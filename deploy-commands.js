@@ -28,16 +28,42 @@ const commands = [
 
 const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
+const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+
 (async () => {
     try {
-        console.log('⏳ جاري تسجيل أوامر السلاش...');
+        if (!process.env.DISCORD_TOKEN) {
+            console.error('❌ DISCORD_TOKEN غير موجود بملف .env — تأكد إنك سويت نسخة .env من .env.example وحطيت التوكن الصحيح.');
+            return;
+        }
+        if (!process.env.CLIENT_ID) {
+            console.error('❌ CLIENT_ID غير موجود بملف .env');
+            return;
+        }
 
-        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), {
-            body: commands,
-        });
-
-        console.log('✅ تم تسجيل الأوامر بنجاح!');
+        if (ALLOWED_GUILD_IDS.length > 0) {
+            // تسجيل على مستوى السيرفر (Guild Commands) — يظهر فوراً خلال ثواني
+            console.log(`⏳ جاري تسجيل أوامر السلاش على ${ALLOWED_GUILD_IDS.length} سيرفر (فوري)...`);
+            for (const guildId of ALLOWED_GUILD_IDS) {
+                await rest.put(
+                    Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
+                    { body: commands }
+                );
+                console.log(`✅ تم تسجيل الأوامر على السيرفر: ${guildId}`);
+            }
+        } else {
+            // ما فيه سيرفرات محددة — نسجل Global (يأخذ حتى ساعة عشان يظهر بكل مكان)
+            console.log('⏳ جاري تسجيل أوامر السلاش عالمياً (Global)... قد تأخذ حتى ساعة للظهور');
+            await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), {
+                body: commands,
+            });
+            console.log('✅ تم تسجيل الأوامر عالمياً بنجاح!');
+        }
     } catch (error) {
-        console.error('❌ خطأ في تسجيل الأوامر:', error);
+        console.error('❌ خطأ في تسجيل الأوامر:', error?.rawError || error?.message || error);
+        console.error('تحقق من: 1) صحة CLIENT_ID  2) صحة DISCORD_TOKEN  3) إن التطبيق فعلاً موجود بنفس الحساب');
     }
 })();

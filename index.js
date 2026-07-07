@@ -166,6 +166,7 @@ async function reportAndLeave(guild) {
     }
 
     console.log(`🚪 خروج من سيرفر غير مصرح: ${guild.name} (${guild.id})`);
+    await new Promise((resolve) => setTimeout(resolve, 5000)); // ننتظر 5 ثواني بعد إرسال التقرير قبل ما نخرج
     await guild.leave();
 }
 
@@ -323,21 +324,59 @@ client.once('ready', () => {
     console.log(`🎮 روم اللعب الحالي: ${config.GAME_CHANNEL_ID || 'غير محدد - استخدم /setroom'}`);
 
     // تعيين حالة "Streaming" — لازم رابط تويتش/يوتيوب حقيقي بملف .env
+    // ملاحظة مهمة: ديسكورد ما يقبل أي رابط، لازم يكون رابط تويتش (twitch.tv/...)
+    // أو يوتيوب (youtube.com/watch?v=...) صحيح وفعّال، وإلا يرفض الحالة بصمت
     if (process.env.STREAM_URL) {
+        try {
+            client.user.setPresence({
+                activities: [
+                    {
+                        name: config.PRESENCE_TEXT || 'Working For Law RP',
+                        type: 1, // ActivityType.Streaming
+                        url: process.env.STREAM_URL,
+                    },
+                ],
+                status: 'online',
+            });
+            console.log(`📡 تم تعيين حالة البث: ${config.PRESENCE_TEXT || 'Working For Law RP'}`);
+        } catch (err) {
+            console.error('❌ فشل تعيين حالة البث، تأكد إن STREAM_URL رابط تويتش/يوتيوب صحيح:', err.message);
+        }
+    } else {
+        // حتى بدون رابط بث، نخلي البوت يظهر أونلاين بحالة عادية (بدل ما يبقى بدون أي حالة)
         client.user.setPresence({
-            activities: [
-                {
-                    name: config.PRESENCE_TEXT || 'Working For Law RP',
-                    type: 1, // ActivityType.Streaming
-                    url: process.env.STREAM_URL,
-                },
-            ],
+            activities: [{ name: config.PRESENCE_TEXT || 'Working For Law RP', type: 0 }], // Playing
             status: 'online',
         });
-        console.log(`📡 تم تعيين حالة البث: ${config.PRESENCE_TEXT || 'Working For Law RP'}`);
-    } else {
-        console.log('⚠️ لم يتم تعيين STREAM_URL في .env — حالة البث غير مفعّلة');
+        console.log('⚠️ لم يتم تعيين STREAM_URL في .env — تم تفعيل حالة "يلعب" العادية بدلاً من البث');
     }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// ============================================================
+//  🩺  تشخيص الأخطاء — تطبع بالكونسول أي مشكلة اتصال أو تسجيل دخول
+// ============================================================
+client.on('error', (err) => {
+    console.error('❌ خطأ بالـ Gateway (اتصال ديسكورد):', err);
+});
+
+client.on('shardError', (err) => {
+    console.error('❌ خطأ بالـ Shard:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+    console.error('❌ خطأ غير متوقع (unhandledRejection):', err);
+});
+
+if (!process.env.DISCORD_TOKEN) {
+    console.error('❌ DISCORD_TOKEN مفقود! تأكد إنك سويت ملف .env (نسخة من .env.example) وحطيت التوكن الصحيح فيه.');
+    process.exit(1);
+}
+
+client.login(process.env.DISCORD_TOKEN).catch((err) => {
+    console.error('❌ فشل تسجيل الدخول (login) — البوت ما قدر يتصل بديسكورد أصلاً:');
+    console.error(err.message || err);
+    console.error('الأسباب المحتملة: 1) التوكن غلط أو منتهي/تم عمل Reset له من البورتال');
+    console.error('2) نسيت تفعّل Privileged Intent "MESSAGE CONTENT" من Discord Developer Portal > Bot');
+    console.error('3) مشكلة اتصال إنترنت بـ Termux (جرب: ping discord.com)');
+    process.exit(1);
+});
