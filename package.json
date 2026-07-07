@@ -1,0 +1,14 @@
+{
+  "name": "kt-bot",
+  "version": "2.0.0",
+  "description": "بوت يرسل اقتراحات عشوائية عند كتابة 'كت' + حماية من الاستخدام في سيرفرات غير مصرحة",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  }
+}
