@@ -409,9 +409,15 @@ if (!process.env.DISCORD_TOKEN) {
 
 console.log('🔐 جاري محاولة تسجيل الدخول بديسكورد...');
 
+const loginTimeout = setTimeout(() => {
+    console.error('⏱️ تحذير: مرت 15 ثانية ولا رد من ديسكورد على login() — الأرجح مشكلة شبكة/اتصال صادر، مو مشكلة توكن.');
+}, 15000);
+
 client.login(process.env.DISCORD_TOKEN).then(() => {
+    clearTimeout(loginTimeout);
     console.log('✅ تم تسجيل الدخول بنجاح (login resolved)');
 }).catch((err) => {
+    clearTimeout(loginTimeout);
     console.error('❌ فشل تسجيل الدخول (login) — البوت ما قدر يتصل بديسكورد أصلاً:');
     console.error(err.message || err);
     console.error('الأسباب المحتملة: 1) التوكن غلط أو منتهي/تم عمل Reset له من البورتال');
