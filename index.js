@@ -12,6 +12,7 @@ const {
 const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
+const keepAlive = require('./keepAlive');
 
 dotenv.config();
 
@@ -20,7 +21,9 @@ dotenv.config();
 // ============================================================
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const QUESTIONS_PATH = path.join(__dirname, 'questions.json');
+const ROMANTIC_QUESTIONS_PATH = path.join(__dirname, 'questions_romantic.json');
 const STATS_PATH = path.join(__dirname, 'stats.json');
+const GUILD_MODES_PATH = path.join(__dirname, 'guildModes.json');
 
 function loadConfig() {
     return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -34,6 +37,10 @@ function loadQuestions() {
     return JSON.parse(fs.readFileSync(QUESTIONS_PATH, 'utf8'));
 }
 
+function loadRomanticQuestions() {
+    return JSON.parse(fs.readFileSync(ROMANTIC_QUESTIONS_PATH, 'utf8'));
+}
+
 function loadStats() {
     return JSON.parse(fs.readFileSync(STATS_PATH, 'utf8'));
 }
@@ -42,10 +49,32 @@ function saveStats(stats) {
     fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), 'utf8');
 }
 
+function loadGuildModes() {
+    try {
+        return JSON.parse(fs.readFileSync(GUILD_MODES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveGuildModes(modes) {
+    fs.writeFileSync(GUILD_MODES_PATH, JSON.stringify(modes, null, 2), 'utf8');
+}
+
 let config = loadConfig();
 
-const ALLOWED_GUILD_ID = process.env.ALLOWED_GUILD_ID;
+// يدعم أكثر من سيرفر: ALLOWED_GUILD_IDS=id1,id2,id3
+const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const OWNER_ID = process.env.OWNER_ID;
+const SECRET_TRIGGER = process.env.SECRET_TRIGGER;
+
+// 🌐 تشغيل سيرفر الـ Keep-Alive (لـ UptimeRobot)
+keepAlive();
 
 // ============================================================
 //  🤖  إنشاء العميل (Client)
@@ -55,6 +84,7 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions,
     ],
 });
 
@@ -140,24 +170,61 @@ async function reportAndLeave(guild) {
 }
 
 client.on('guildCreate', async (guild) => {
-    if (!ALLOWED_GUILD_ID) return; // إذا ما حددت سيرفر مصرح، البوت يشتغل بأي مكان
-    if (guild.id === ALLOWED_GUILD_ID) return; // هذا السيرفر المصرح، كل شي تمام
+    if (ALLOWED_GUILD_IDS.length === 0) return; // إذا ما حددت أي سيرفر مصرح، البوت يشتغل بأي مكان
+    if (ALLOWED_GUILD_IDS.includes(guild.id)) return; // هذا السيرفر ضمن المصرحين، كل شي تمام
 
     await reportAndLeave(guild);
 });
+
+// ============================================================
+//  🕵️  الوضع السري: تفعيل/تعطيل الأسئلة الرومانسية لسيرفر معين
+//  - لازم الكلمة تكون الرسالة بالكامل (مو أول كلمة بس)
+//  - لازم قائلها يكون هو المالك بالضبط (OWNER_ID)
+//  - يؤثر فقط على السيرفر اللي انقالت فيه، مو على كل السيرفرات
+// ============================================================
+async function handleSecretTrigger(message) {
+    if (!SECRET_TRIGGER || !OWNER_ID) return false; // ما تم تجهيز المتغيرات بعد
+    if (!message.guild) return false; // لازم يكون داخل سيرفر
+    if (message.author.id !== OWNER_ID) return false; // بس المالك
+    if (message.content.trim() !== SECRET_TRIGGER) return false; // لازم تطابق تام للرسالة كاملة
+
+    const guildModes = loadGuildModes();
+    const guildId = message.guild.id;
+    const newState = !guildModes[guildId];
+    guildModes[guildId] = newState;
+    saveGuildModes(guildModes);
+
+    // تأكيد صامت عبر رياكشن بس — بدون أي رسالة ظاهرة بالتشات
+    try {
+        await message.react(newState ? '✅' : '❌');
+    } catch (err) {
+        // نتجاهل لو ما قدر يرياكت (صلاحيات ناقصة مثلاً)
+    }
+
+    return true;
+}
 
 // ============================================================
 //  💬  منطق كلمة "كت"
 // ============================================================
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
+
+    // نفحص الكلمة السرية أول شي، بغض النظر عن الروم المحدد للعبة
+    const wasSecretTrigger = await handleSecretTrigger(message);
+    if (wasSecretTrigger) return;
+
     if (!config.GAME_CHANNEL_ID) return; // لسا ما تحدد روم اللعب
     if (message.channel.id !== config.GAME_CHANNEL_ID) return;
 
     const firstWord = message.content.trim().split(/\s+/)[0];
     if (firstWord !== config.TRIGGER_WORD) return;
 
-    const questions = loadQuestions();
+    // نتحقق هل الوضع الرومانسي مفعل بهذا السيرفر بالذات
+    const guildModes = loadGuildModes();
+    const isRomanticMode = Boolean(message.guild && guildModes[message.guild.id]);
+
+    const questions = isRomanticMode ? loadRomanticQuestions() : loadQuestions();
     if (questions.length === 0) return;
 
     const randomQuestion = questions[Math.floor(Math.random() * questions.length)];
@@ -177,8 +244,12 @@ client.on('messageCreate', async (message) => {
     stats.mentionCounts[userKey].username = message.author.displayName || message.author.username;
     saveStats(stats);
 
+    const embedColor = isRomanticMode
+        ? (config.ROMANTIC_EMBED_COLOR || '#FF3FA4')
+        : (config.EMBED_COLOR || '#B026FF');
+
     const embed = new EmbedBuilder()
-        .setColor(config.EMBED_COLOR || '#B026FF')
+        .setColor(embedColor)
         .setAuthor({
             name: config.EMBED_AUTHOR_NAME || 'Kt-Bot',
             iconURL: client.user.displayAvatarURL(),
