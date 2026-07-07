@@ -3,6 +3,14 @@
 //  البوت الرئيسي: كت + حماية السيرفرات + أوامر أدمن
 // ============================================================
 
+process.on('uncaughtException', (err) => {
+    console.error('❌❌❌ خطأ فادح غير ممسوك (uncaughtException):', err);
+});
+
+process.on('unhandledRejection', (err) => {
+    console.error('❌❌❌ خطأ غير متوقع (unhandledRejection) من بداية التشغيل:', err);
+});
+
 const {
     Client,
     GatewayIntentBits,
@@ -61,7 +69,38 @@ function saveGuildModes(modes) {
     fs.writeFileSync(GUILD_MODES_PATH, JSON.stringify(modes, null, 2), 'utf8');
 }
 
-let config = loadConfig();
+let config;
+try {
+    config = loadConfig();
+    console.log('✅ تم تحميل config.json بنجاح');
+} catch (err) {
+    console.error('❌ فشل تحميل config.json:', err.message);
+    process.exit(1);
+}
+
+try {
+    const q = loadQuestions();
+    console.log(`✅ تم تحميل questions.json بنجاح (${q.length} سؤال)`);
+} catch (err) {
+    console.error('❌ فشل تحميل questions.json:', err.message);
+    process.exit(1);
+}
+
+try {
+    const rq = loadRomanticQuestions();
+    console.log(`✅ تم تحميل questions_romantic.json بنجاح (${rq.length} سؤال)`);
+} catch (err) {
+    console.error('❌ فشل تحميل questions_romantic.json:', err.message);
+    process.exit(1);
+}
+
+try {
+    loadStats();
+    console.log('✅ تم تحميل stats.json بنجاح');
+} catch (err) {
+    console.error('❌ فشل تحميل stats.json:', err.message);
+    process.exit(1);
+}
 
 // يدعم أكثر من سيرفر: ALLOWED_GUILD_IDS=id1,id2,id3
 const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || '')
@@ -363,16 +402,16 @@ client.on('shardError', (err) => {
     console.error('❌ خطأ بالـ Shard:', err);
 });
 
-process.on('unhandledRejection', (err) => {
-    console.error('❌ خطأ غير متوقع (unhandledRejection):', err);
-});
-
 if (!process.env.DISCORD_TOKEN) {
     console.error('❌ DISCORD_TOKEN مفقود! تأكد إنك سويت ملف .env (نسخة من .env.example) وحطيت التوكن الصحيح فيه.');
     process.exit(1);
 }
 
-client.login(process.env.DISCORD_TOKEN).catch((err) => {
+console.log('🔐 جاري محاولة تسجيل الدخول بديسكورد...');
+
+client.login(process.env.DISCORD_TOKEN).then(() => {
+    console.log('✅ تم تسجيل الدخول بنجاح (login resolved)');
+}).catch((err) => {
     console.error('❌ فشل تسجيل الدخول (login) — البوت ما قدر يتصل بديسكورد أصلاً:');
     console.error(err.message || err);
     console.error('الأسباب المحتملة: 1) التوكن غلط أو منتهي/تم عمل Reset له من البورتال');
