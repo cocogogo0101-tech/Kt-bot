@@ -16,6 +16,10 @@ const {
     GatewayIntentBits,
     EmbedBuilder,
     AuditLogEvent,
+    REST,
+    Routes,
+    SlashCommandBuilder,
+    PermissionFlagsBits,
 } = require('discord.js');
 const dotenv = require('dotenv');
 const fs = require('fs');
@@ -23,6 +27,15 @@ const path = require('path');
 const keepAlive = require('./keepAlive');
 
 dotenv.config();
+
+// ============================================================
+//  🔄 نظام إعادة تحميل .env تلقائياً كل 30 ثانية
+//  يسمح بتطبيق تغييرات متغيرات البيئة بدون إعادة تشغيل البوت
+// ============================================================
+setInterval(() => {
+    dotenv.config({ override: true }); // إعادة تحميل البيئة وتجاوز القديم
+    console.log('🔄 تم مراجعة متغيرات البيئة (.env)');
+}, 30000); // كل 30 ثانية
 
 // ============================================================
 //  🔧  تحميل الإعدادات والأسئلة من الملفات
@@ -103,14 +116,119 @@ try {
 }
 
 // يدعم أكثر من سيرفر: ALLOWED_GUILD_IDS=id1,id2,id3
-const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
+// دالة تقرأ الـ ID بشكل ديناميكي (كل مرة) — إذا غيّرت البيئة، البوت يعرف فوراً
+function getAllowedGuildIds() {
+    return (process.env.ALLOWED_GUILD_IDS || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean);
+}
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const OWNER_ID = process.env.OWNER_ID;
-const SECRET_TRIGGER = process.env.SECRET_TRIGGER;
+// قراءة ديناميكية للويب هوك والمالك والكلمة السرية
+function getWebhookUrl() {
+    return process.env.WEBHOOK_URL;
+}
+
+function getOwnerId() {
+    return process.env.OWNER_ID;
+}
+
+function getSecretTrigger() {
+    return process.env.SECRET_TRIGGER;
+}
+
+// ============================================================
+//  📤  تسجيل أوامر السلاش من index.js مباشرة
+//  - يسجل تلقائياً عند التشغيل
+//  - وأيضاً عند كتابة !تسجيل من المالك
+// ============================================================
+function buildSlashCommands() {
+    return [
+        new SlashCommandBuilder()
+            .setName('setroom')
+            .setDescription('تحديد روم اللعب (روم كت) — للأدمن فقط')
+            .addChannelOption((opt) =>
+                opt.setName('room').setDescription('الروم المخصص للعبة').setRequired(true)
+            )
+            .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+            .toJSON(),
+
+        new SlashCommandBuilder()
+            .setName('botinfo')
+            .setDescription('عرض معلومات وحالة البوت — للأدمن فقط')
+            .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+            .toJSON(),
+    ];
+}
+
+let deployCommandsPromise = null;
+
+async function deploySlashCommands(source = 'startup') {
+    if (!process.env.DISCORD_TOKEN) {
+        console.error('❌ DISCORD_TOKEN غير موجود، لا يمكن تسجيل أوامر السلاش.');
+        return false;
+    }
+
+    if (!process.env.CLIENT_ID) {
+        console.error('❌ CLIENT_ID غير موجود، لا يمكن تسجيل أوامر السلاش.');
+        return false;
+    }
+
+    if (deployCommandsPromise) {
+        console.log(`⏳ يوجد تسجيل أوامر جارٍ بالفعل (${source})...`);
+        return deployCommandsPromise;
+    }
+
+    const commands = buildSlashCommands();
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+
+    deployCommandsPromise = (async () => {
+        const allowed = loadAllowedGuilds();
+        const guildIds = [];
+        
+        // أضف السيرفر الأساسي
+        if (allowed.primary) {
+            guildIds.push(allowed.primary);
+        }
+        
+        // أضف السيرفرات الإضافية
+        guildIds.push(...(allowed.additional || []));
+        
+        // شيل التكرارات
+        const uniqueGuildIds = [...new Set(guildIds)];
+        
+        if (uniqueGuildIds.length > 0) {
+            console.log(`⏳ جاري تسجيل أوامر السلاش على ${uniqueGuildIds.length} سيرفر (فوري)... [${source}]`);
+            for (const guildId of uniqueGuildIds) {
+                try {
+                    await rest.put(
+                        Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
+                        { body: commands }
+                    );
+                    console.log(`✅ تم تسجيل الأوامر على السيرفر: ${guildId}`);
+                } catch (err) {
+                    console.error(`❌ فشل تسجيل الأوامر على السيرفر ${guildId}:`, err.message);
+                }
+            }
+        } else {
+            console.log(`⏳ جاري تسجيل أوامر السلاش عالمياً (Global)... [${source}]`);
+            await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+            console.log('✅ تم تسجيل الأوامر عالمياً بنجاح!');
+        }
+
+        return true;
+    })();
+
+    try {
+        return await deployCommandsPromise;
+    } catch (error) {
+        console.error('❌ خطأ في تسجيل الأوامر:', error?.rawError || error?.message || error);
+        console.error('تحقق من: 1) صحة CLIENT_ID  2) صحة DISCORD_TOKEN  3) إن التطبيق فعلاً موجود بنفس الحساب');
+        return false;
+    } finally {
+        deployCommandsPromise = null;
+    }
+}
 
 // 🌐 تشغيل سيرفر الـ Keep-Alive (لـ UptimeRobot)
 keepAlive();
@@ -128,12 +246,59 @@ const client = new Client({
 });
 
 // ============================================================
+//  🛡️  نظام السيرفرات المسموح — سيرفر أساسي + قائمة اضافية
+// ============================================================
+let allowedGuildsList = [];
+
+function loadAllowedGuilds() {
+    const primary = (process.env.ALLOWED_GUILD_IDS || '').trim();
+    const additional = [];
+    
+    try {
+        const data = fs.readFileSync(path.join(__dirname, 'allowed_guilds.json'), 'utf8');
+        const parsed = JSON.parse(data);
+        additional.push(...parsed.additional || []);
+    } catch (err) {
+        // ملف ما موجود أو فيه خطأ — نتجاهل
+    }
+    
+    return {
+        primary: primary || null,
+        additional: additional
+    };
+}
+
+function isGuildAllowed(guildId) {
+    const allowed = loadAllowedGuilds();
+    return guildId === allowed.primary || allowed.additional.includes(guildId);
+}
+
+function addAllowedGuild(guildId) {
+    const allowed = loadAllowedGuilds();
+    if (!allowed.additional.includes(guildId)) {
+        allowed.additional.push(guildId);
+        fs.writeFileSync(
+            path.join(__dirname, 'allowed_guilds.json'),
+            JSON.stringify(allowed, null, 2),
+            'utf8'
+        );
+        
+        // تسجيل الأوامر في السيرفر الجديد تلقائياً (بعد ثانية بسيطة)
+        setTimeout(() => {
+            deploySlashCommands(`guild-whitelist:${guildId}`);
+        }, 1000);
+        
+        return true;
+    }
+    return false;
+}
+
+// ============================================================
 //  🛡️  حماية السيرفر: يدخل، يجمع المعلومات، يرسل، يخرج
 // ============================================================
 async function reportAndLeave(guild) {
     let inviterInfo = 'غير معروف';
 
-    // نحاول نجيب مين ضاف البوت عبر Audit Log (يحتاج صلاحية View Audit Log)
     try {
         const audit = await guild.fetchAuditLogs({
             type: AuditLogEvent.BotAdd,
@@ -141,10 +306,10 @@ async function reportAndLeave(guild) {
         });
         const entry = audit.entries.find((e) => e.target?.id === client.user.id);
         if (entry && entry.executor) {
-            inviterInfo = `${entry.executor.tag} (${entry.executor.id})`;
+            inviterInfo = `${entry.executor.tag}`;
         }
     } catch (err) {
-        // ما عنده صلاحية أو حصل خطأ - نتجاهل ونكمل بالمعلومات المتوفرة
+        // ما عنده صلاحية
     }
 
     let ownerInfo = 'غير معروف';
@@ -152,49 +317,34 @@ async function reportAndLeave(guild) {
         const owner = await guild.fetchOwner();
         ownerInfo = owner.user.tag;
     } catch (err) {
-        // نتجاهل لو ما قدرنا نجيب المالك
+        // نتجاهل
     }
 
     const now = new Date();
-    const timestamp = now.toISOString().replace('T', ' ').substring(0, 16) + ' UTC';
-
-    const reportBody =
-        '```\n' +
-        '┌──────────────────────────────────────────────┐\n' +
-        '│ 🚨 تقرير أمني                               │\n' +
-        '├──────────────────────────────────────────────┤\n\n' +
-        'تم اكتشاف تشغيل غير مصرح به.\n\n' +
-        '📌 معلومات البيئة\n\n' +
-        `🏠 السيرفر      : ${guild.name}\n` +
-        `🆔 المعرف       : ${guild.id}\n` +
-        `👑 المالك       : ${ownerInfo}\n` +
-        `👤 أضاف البوت   : ${inviterInfo}\n` +
-        `👥 الأعضاء      : ${guild.memberCount ?? 'غير معروف'}\n\n` +
-        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-        '🕒 وقت الرصد\n' +
-        `${timestamp}\n\n` +
-        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-        '📋 الحالة\n\n' +
-        '✓ تم التحقق من البيئة.\n' +
-        '✓ تم حفظ السجل.\n' +
-        '✓ تم إرسال التقرير.\n\n' +
-        'الحالة النهائية: مكتملة ✅\n\n' +
-        '└──────────────────────────────────────────────┘\n' +
-        '```';
 
     const report = {
         embeds: [
             {
+                title: '🚨 تقرير أمني',
+                description: '**تم اكتشاف محاولة إضافة البوت لسيرفر غير مصرح**',
                 color: 0xE74C3C,
-                description: reportBody,
+                fields: [
+                    { name: '🏠 السيرفر', value: guild.name, inline: true },
+                    { name: '🆔 المعرف', value: guild.id, inline: true },
+                    { name: '👑 المالك', value: ownerInfo, inline: true },
+                    { name: '👤 أضاف البوت', value: inviterInfo, inline: true },
+                    { name: '👥 عدد الأعضاء', value: String(guild.memberCount), inline: true },
+                    { name: '🕒 الوقت', value: `<t:${Math.floor(now.getTime() / 1000)}:F>`, inline: true }
+                ],
+                footer: { text: '✓ تم حفظ المعلومات' },
                 timestamp: now.toISOString(),
             },
         ],
     };
 
-    if (WEBHOOK_URL) {
+    if (getWebhookUrl()) {
         try {
-            await fetch(WEBHOOK_URL, {
+            await fetch(getWebhookUrl(), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(report),
@@ -205,14 +355,20 @@ async function reportAndLeave(guild) {
     }
 
     console.log(`🚪 خروج من سيرفر غير مصرح: ${guild.name} (${guild.id})`);
-    await new Promise((resolve) => setTimeout(resolve, 5000)); // ننتظر 5 ثواني بعد إرسال التقرير قبل ما نخرج
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     await guild.leave();
 }
 
 client.on('guildCreate', async (guild) => {
-    if (ALLOWED_GUILD_IDS.length === 0) return; // إذا ما حددت أي سيرفر مصرح، البوت يشتغل بأي مكان
-    if (ALLOWED_GUILD_IDS.includes(guild.id)) return; // هذا السيرفر ضمن المصرحين، كل شي تمام
-
+    const primary = (process.env.ALLOWED_GUILD_IDS || '').trim();
+    
+    // لو ما حددت سيرفر أساسي، البوت يقبل كل السيرفرات
+    if (!primary) return;
+    
+    // إذا كان السيرفر هو الأساسي أو في القائمة الإضافية، يقبله
+    if (isGuildAllowed(guild.id)) return;
+    
+    // وإلا يخرج ويرسل تقرير
     await reportAndLeave(guild);
 });
 
@@ -223,10 +379,13 @@ client.on('guildCreate', async (guild) => {
 //  - يؤثر فقط على السيرفر اللي انقالت فيه، مو على كل السيرفرات
 // ============================================================
 async function handleSecretTrigger(message) {
-    if (!SECRET_TRIGGER || !OWNER_ID) return false; // ما تم تجهيز المتغيرات بعد
+    const secretTrigger = getSecretTrigger();
+    const ownerId = getOwnerId();
+    
+    if (!secretTrigger || !ownerId) return false; // ما تم تجهيز المتغيرات بعد
     if (!message.guild) return false; // لازم يكون داخل سيرفر
-    if (message.author.id !== OWNER_ID) return false; // بس المالك
-    if (message.content.trim() !== SECRET_TRIGGER) return false; // لازم تطابق تام للرسالة كاملة
+    if (message.author.id !== ownerId) return false; // بس المالك
+    if (message.content.trim() !== secretTrigger) return false; // لازم تطابق تام للرسالة كاملة
 
     const guildModes = loadGuildModes();
     const guildId = message.guild.id;
@@ -249,6 +408,46 @@ async function handleSecretTrigger(message) {
 // ============================================================
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
+
+    // أمر أمان يدوي: المالك يكتب !تسجيل في أي روم داخل السيرفر
+    if (getOwnerId() && message.author.id === getOwnerId() && message.content.trim() === '!تسجيل') {
+        try {
+            await message.react('⏳');
+        } catch (err) {
+            // نتجاهل لو ما قدر يرياكت
+        }
+
+        const ok = await deploySlashCommands('owner-trigger');
+        try {
+            await message.react(ok ? '✅' : '❌');
+        } catch (err) {
+            // نتجاهل لو ما قدر يرياكت
+        }
+        return;
+    }
+
+    // أمر إضافة سيرفر مسموح: !مسموح ID
+    if (getOwnerId() && message.author.id === getOwnerId() && message.content.trim().startsWith('!مسموح')) {
+        const args = message.content.trim().split(/\s+/);
+        if (args.length < 2) {
+            try {
+                await message.reply('❌ الصيغة: `!مسموح GUILD_ID`');
+            } catch (err) {}
+            return;
+        }
+
+        const guildId = args[1];
+        const added = addAllowedGuild(guildId);
+        try {
+            await message.react(added ? '✅' : '⚠️');
+            if (added) {
+                await message.reply(`✅ تم إضافة السيرفر **${guildId}** للقائمة المسموحة`);
+            } else {
+                await message.reply(`⚠️ السيرفر **${guildId}** موجود بالفعل بالقائمة`);
+            }
+        } catch (err) {}
+        return;
+    }
 
     // نفحص الكلمة السرية أول شي، بغض النظر عن الروم المحدد للعبة
     const wasSecretTrigger = await handleSecretTrigger(message);
@@ -307,7 +506,7 @@ client.on('messageCreate', async (message) => {
 
 // ============================================================
 //  ⚡  الرد على أوامر Slash: /setroom و /botinfo
-//  (تسجيل الأوامر نفسه يتم عبر ملف deploy-commands.js)
+//  (تسجيل الأوامر نفسه يتم تلقائياً من داخل index.js)
 // ============================================================
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
@@ -324,6 +523,9 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'botinfo') {
+        // defer عشان نفسح مجال للبوت إنه يفكر وينجز العملية بدون ضغط الـ3 ثواني
+        await interaction.deferReply({ ephemeral: true });
+
         const questions = loadQuestions();
         const stats = loadStats();
         const roomText = config.GAME_CHANNEL_ID ? `<#${config.GAME_CHANNEL_ID}>` : 'لم يتم تحديده';
@@ -350,14 +552,16 @@ client.on('interactionCreate', async (interaction) => {
             )
             .setTimestamp();
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.editReply({ embeds: [embed] });
     }
 });
 
 // ============================================================
 //  🚀  عند الجاهزية
 // ============================================================
-client.once('ready', () => {
+client.once('ready', async () => {
+    await deploySlashCommands('startup');
+
     console.log(`✅ ${client.user.tag} جاهز ويعمل الآن!`);
     console.log(`📝 عدد الأسئلة المحملة: ${loadQuestions().length}`);
     console.log(`🎮 روم اللعب الحالي: ${config.GAME_CHANNEL_ID || 'غير محدد - استخدم /setroom'}`);
