@@ -57,12 +57,59 @@ function saveConfig(config) {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
 }
 
+// ============================================================
+//  📁  FILE WATCHER - مراقبة التغييرات وتحديث الـcache
+// ============================================================
+function watchQuestionsFiles() {
+    try {
+        fs.watchFile(QUESTIONS_PATH, () => {
+            console.log('📝 تم اكتشاف تغيير في questions.json - تحديث الـcache...');
+            questionsCache = null; // أعد تحميل عند الطلب التالي
+            loadQuestions(); // حمّل فوراً
+        });
+        
+        fs.watchFile(ROMANTIC_QUESTIONS_PATH, () => {
+            console.log('💕 تم اكتشاف تغيير في questions_romantic.json - تحديث الـcache...');
+            romanticQuestionsCache = null;
+            loadRomanticQuestions();
+        });
+        
+        console.log('👁️  بدأت مراقبة الملفات');
+    } catch (err) {
+        console.error('⚠️ خطأ تفعيل مراقبة الملفات:', err.message);
+    }
+}
+let questionsCache = null;
+let romanticQuestionsCache = null;
+let stateWriteQueue = {};
+let stateWriteTimer = null;
+
+const BATCH_WRITE_INTERVAL = 5000; // احفظ كل 5 ثواني بدل كل سؤال
+
 function loadQuestions() {
-    return JSON.parse(fs.readFileSync(QUESTIONS_PATH, 'utf8'));
+    try {
+        if (questionsCache === null) {
+            questionsCache = JSON.parse(fs.readFileSync(QUESTIONS_PATH, 'utf8'));
+            console.log(`✅ تم تحميل الأسئلة في الذاكرة (${questionsCache.length} سؤال)`);
+        }
+        return questionsCache;
+    } catch (err) {
+        console.error('❌ خطأ تحميل questions.json:', err.message);
+        return [];
+    }
 }
 
 function loadRomanticQuestions() {
-    return JSON.parse(fs.readFileSync(ROMANTIC_QUESTIONS_PATH, 'utf8'));
+    try {
+        if (romanticQuestionsCache === null) {
+            romanticQuestionsCache = JSON.parse(fs.readFileSync(ROMANTIC_QUESTIONS_PATH, 'utf8'));
+            console.log(`✅ تم تحميل الأسئلة الرومانسية في الذاكرة (${romanticQuestionsCache.length} سؤال)`);
+        }
+        return romanticQuestionsCache;
+    } catch (err) {
+        console.error('❌ خطأ تحميل questions_romantic.json:', err.message);
+        return [];
+    }
 }
 
 function loadStats() {
@@ -77,12 +124,59 @@ function loadQuestionState() {
     try {
         return JSON.parse(fs.readFileSync(QUESTION_STATE_PATH, 'utf8'));
     } catch (err) {
+        if (err.code !== 'ENOENT') { // ملف موجود بس فيه خطأ parse
+            console.error('⚠️ خطأ تحميل questionState:', err.message);
+        }
         return {};
     }
 }
 
+// ============================================================
+//  🧹  MAINTENANCE - تنظيف وضغط البيانات
+// ============================================================
+function cleanupQuestionState() {
+    const state = loadQuestionState();
+    const keys = Object.keys(state);
+    
+    let cleaned = 0;
+    
+    // احذف إعدادات سيرفرات قديمة (ما موجودة بـAllowedGuilds)
+    const allowed = loadAllowedGuilds();
+    const validGuilds = new Set([allowed.primary, ...allowed.additional].filter(Boolean));
+    
+    for (const key of keys) {
+        const guildId = key.split('_')[0];
+        if (!validGuilds.has(guildId)) {
+            delete state[key];
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        saveQuestionState(state);
+        console.log(`🧹 تم تنظيف ${cleaned} إعدادات سيرفر قديم`);
+    }
+}
+
+// اشغل التنظيف كل ساعة
+setInterval(cleanupQuestionState, 3600000);
+
 function saveQuestionState(state) {
-    fs.writeFileSync(QUESTION_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+    // بدل حفظ فوري، أضيف للـqueue
+    stateWriteQueue = state;
+    
+    // إلغاء التايمر القديم لو موجود
+    if (stateWriteTimer) clearTimeout(stateWriteTimer);
+    
+    // اكتب بعد 5 ثواني (batch)
+    stateWriteTimer = setTimeout(() => {
+        try {
+            fs.writeFileSync(QUESTION_STATE_PATH, JSON.stringify(stateWriteQueue, null, 2), 'utf8');
+        } catch (err) {
+            console.error('❌ خطأ حفظ questionState:', err.message);
+        }
+        stateWriteTimer = null;
+    }, BATCH_WRITE_INTERVAL);
 }
 
 function loadGuildModes() {
@@ -141,8 +235,8 @@ function getQuestionsChecksum(questions) {
 
 function getNextQuestion(questions, guildId, isRomanticMode) {
     if (!guildId) {
-        const shuffled = shuffle(questions);
-        return shuffled[0] || null;
+        const randomIndex = Math.floor(Math.random() * questions.length);
+        return questions[randomIndex] || null;
     }
 
     const state = loadQuestionState();
@@ -151,22 +245,25 @@ function getNextQuestion(questions, guildId, isRomanticMode) {
     const deckState = state[deckKey];
 
     if (!deckState || deckState.checksum !== checksum || !Array.isArray(deckState.order) || deckState.order.length !== questions.length || typeof deckState.index !== 'number' || deckState.index < 0 || deckState.index >= deckState.order.length) {
+        // إنشاء array من الأرقام (indices) مختلطة عشوائياً
+        const indices = Array.from({ length: questions.length }, (_, i) => i);
         state[deckKey] = {
             checksum,
-            order: shuffle(questions),
+            order: shuffle(indices),  // ✅ أرقام مو الأسئلة نفسهم
             index: 0,
         };
         saveQuestionState(state);
     }
 
     const currentState = state[deckKey];
-    const questionIndex = currentState.order[currentState.index];
-    const question = questions[questionIndex];
+    const questionIndex = currentState.order[currentState.index];  // ✅ هذا يكون رقم
+    const question = questions[questionIndex];  // ✅ تمام
 
     currentState.index += 1;
 
     if (currentState.index >= currentState.order.length) {
-        currentState.order = shuffle(questions);
+        const indices = Array.from({ length: questions.length }, (_, i) => i);
+        currentState.order = shuffle(indices);  // ✅ أرقام مختلطة
         currentState.index = 0;
         currentState.checksum = checksum;
     }
@@ -550,6 +647,56 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
+    // أمر إعادة تحميل الأسئلة: !إعادة_تحميل
+    if (getOwnerId() && message.author.id === getOwnerId() && message.content.trim() === '!إعادة_تحميل') {
+        try {
+            questionsCache = null;
+            romanticQuestionsCache = null;
+            const q = loadQuestions();
+            const rq = loadRomanticQuestions();
+            await message.react('✅');
+            await message.reply(`✅ تم إعادة تحميل الأسئلة\n📝 عادي: ${q.length}\n💕 رومانسي: ${rq.length}`);
+        } catch (err) {
+            await message.reply(`❌ خطأ: ${err.message}`);
+        }
+        return;
+    }
+
+    // أمر الإحصائيات: !احصائيات
+    if (getOwnerId() && message.author.id === getOwnerId() && message.content.trim() === '!احصائيات') {
+        try {
+            const stats = loadStats();
+            const state = loadQuestionState();
+            const q = questionsCache ? questionsCache.length : '؟';
+            const rq = romanticQuestionsCache ? romanticQuestionsCache.length : '؟';
+            
+            const statsMsg = `📊 **احصائيات النظام:**
+            
+📝 الأسئلة (Cached): ${q} عادي + ${rq} رومانسي
+🎲 حالات السيرفرات: ${Object.keys(state).length}
+📈 إجمالي الاستخدام: ${stats.totalUses || 0}
+💾 حجم questionState: ${JSON.stringify(state).length / 1024} KB`;
+            
+            await message.reply(statsMsg);
+        } catch (err) {
+            await message.reply(`❌ خطأ: ${err.message}`);
+        }
+        return;
+    }
+
+    // أمر تنظيف: !تنظيف
+    if (getOwnerId() && message.author.id === getOwnerId() && message.content.trim() === '!تنظيف') {
+        try {
+            await message.react('⏳');
+            cleanupQuestionState();
+            await message.react('✅');
+            await message.reply('✅ تم تنظيف البيانات القديمة');
+        } catch (err) {
+            await message.reply(`❌ خطأ: ${err.message}`);
+        }
+        return;
+    }
+
     // نفحص الكلمة السرية أول شي، بغض النظر عن الروم المحدد للعبة
     const wasSecretTrigger = await handleSecretTrigger(message);
     if (wasSecretTrigger) return;
@@ -665,8 +812,13 @@ client.on('interactionCreate', async (interaction) => {
 client.once('ready', async () => {
     await deploySlashCommands('startup');
 
+    // تحميل الأسئلة في الذاكرة وبدء مراقبة الملفات
+    loadQuestions();
+    loadRomanticQuestions();
+    watchQuestionsFiles();
+
     console.log(`✅ ${client.user.tag} جاهز ويعمل الآن!`);
-    console.log(`📝 عدد الأسئلة المحملة: ${loadQuestions().length}`);
+    console.log(`📝 عدد الأسئلة المحملة: ${questionsCache.length}`);
     console.log(`🎮 روم اللعب الحالي: إعدادات خاصة لكل سيرفر (استخدم /setroom داخل السيرفر)`);
 
     // تعيين حالة "Streaming" — لازم رابط تويتش/يوتيوب حقيقي بملف .env
