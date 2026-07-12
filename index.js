@@ -24,6 +24,7 @@ const {
 const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const keepAlive = require('./keepAlive');
 
 dotenv.config();
@@ -43,8 +44,10 @@ setInterval(() => {
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const QUESTIONS_PATH = path.join(__dirname, 'questions.json');
 const ROMANTIC_QUESTIONS_PATH = path.join(__dirname, 'questions_romantic.json');
+const QUESTION_STATE_PATH = path.join(__dirname, 'questionState.json');
 const STATS_PATH = path.join(__dirname, 'stats.json');
 const GUILD_MODES_PATH = path.join(__dirname, 'guildModes.json');
+const GUILD_SETTINGS_PATH = path.join(__dirname, 'guildSettings.json');
 
 function loadConfig() {
     return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -70,6 +73,18 @@ function saveStats(stats) {
     fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), 'utf8');
 }
 
+function loadQuestionState() {
+    try {
+        return JSON.parse(fs.readFileSync(QUESTION_STATE_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveQuestionState(state) {
+    fs.writeFileSync(QUESTION_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+}
+
 function loadGuildModes() {
     try {
         return JSON.parse(fs.readFileSync(GUILD_MODES_PATH, 'utf8'));
@@ -80,6 +95,84 @@ function loadGuildModes() {
 
 function saveGuildModes(modes) {
     fs.writeFileSync(GUILD_MODES_PATH, JSON.stringify(modes, null, 2), 'utf8');
+}
+
+function loadGuildSettings() {
+    try {
+        return JSON.parse(fs.readFileSync(GUILD_SETTINGS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveGuildSettings(settings) {
+    fs.writeFileSync(GUILD_SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf8');
+}
+
+function getGuildSettings(guildId) {
+    const settings = loadGuildSettings();
+    return settings[guildId] || {};
+}
+
+function setGuildGameChannelId(guildId, channelId) {
+    const settings = loadGuildSettings();
+    if (!settings[guildId]) settings[guildId] = {};
+    settings[guildId].GAME_CHANNEL_ID = channelId;
+    saveGuildSettings(settings);
+}
+
+function getGuildGameChannelId(guildId) {
+    const guildSettings = getGuildSettings(guildId);
+    return guildSettings.GAME_CHANNEL_ID || config.GAME_CHANNEL_ID || null;
+}
+
+function shuffle(array) {
+    const arr = [...array];
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+function getQuestionsChecksum(questions) {
+    return crypto.createHash('sha1').update(JSON.stringify(questions)).digest('hex');
+}
+
+function getNextQuestion(questions, guildId, isRomanticMode) {
+    if (!guildId) {
+        const shuffled = shuffle(questions);
+        return shuffled[0] || null;
+    }
+
+    const state = loadQuestionState();
+    const deckKey = `${guildId}_${isRomanticMode ? 'romantic' : 'normal'}`;
+    const checksum = getQuestionsChecksum(questions);
+    const deckState = state[deckKey];
+
+    if (!deckState || deckState.checksum !== checksum || !Array.isArray(deckState.order) || deckState.order.length !== questions.length || typeof deckState.index !== 'number' || deckState.index < 0 || deckState.index >= deckState.order.length) {
+        state[deckKey] = {
+            checksum,
+            order: shuffle(questions),
+            index: 0,
+        };
+        saveQuestionState(state);
+    }
+
+    const currentState = state[deckKey];
+    const questionIndex = currentState.order[currentState.index];
+    const question = questions[questionIndex];
+
+    currentState.index += 1;
+
+    if (currentState.index >= currentState.order.length) {
+        currentState.order = shuffle(questions);
+        currentState.index = 0;
+        currentState.checksum = checksum;
+    }
+
+    saveQuestionState(state);
+    return question || null;
 }
 
 let config;
@@ -115,6 +208,14 @@ try {
     process.exit(1);
 }
 
+try {
+    loadQuestionState();
+    console.log('✅ تم تحميل questionState.json بنجاح');
+} catch (err) {
+    console.error('❌ فشل تحميل questionState.json:', err.message);
+    process.exit(1);
+}
+
 // يدعم أكثر من سيرفر: ALLOWED_GUILD_IDS=id1,id2,id3
 // دالة تقرأ الـ ID بشكل ديناميكي (كل مرة) — إذا غيّرت البيئة، البوت يعرف فوراً
 function getAllowedGuildIds() {
@@ -146,9 +247,9 @@ function buildSlashCommands() {
     return [
         new SlashCommandBuilder()
             .setName('setroom')
-            .setDescription('تحديد روم اللعب (روم كت) — للأدمن فقط')
+            .setDescription('تحديد روم اللعب لهذا السيرفر فقط — للأدمن فقط')
             .addChannelOption((opt) =>
-                opt.setName('room').setDescription('الروم المخصص للعبة').setRequired(true)
+                opt.setName('room').setDescription('الروم المخصص للعبة في هذا السيرفر').setRequired(true)
             )
             .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
             .toJSON(),
@@ -453,8 +554,9 @@ client.on('messageCreate', async (message) => {
     const wasSecretTrigger = await handleSecretTrigger(message);
     if (wasSecretTrigger) return;
 
-    if (!config.GAME_CHANNEL_ID) return; // لسا ما تحدد روم اللعب
-    if (message.channel.id !== config.GAME_CHANNEL_ID) return;
+    const gameChannelId = message.guild ? getGuildGameChannelId(message.guild.id) : null;
+    if (!gameChannelId) return; // لسا ما تحدد روم اللعب لهذا السيرفر
+    if (message.channel.id !== gameChannelId) return;
 
     const firstWord = message.content.trim().split(/\s+/)[0];
     if (firstWord !== config.TRIGGER_WORD) return;
@@ -466,7 +568,8 @@ client.on('messageCreate', async (message) => {
     const questions = isRomanticMode ? loadRomanticQuestions() : loadQuestions();
     if (questions.length === 0) return;
 
-    const randomQuestion = questions[Math.floor(Math.random() * questions.length)];
+    const randomQuestion = getNextQuestion(questions, message.guild?.id, isRomanticMode);
+    if (!randomQuestion) return;
 
     // تحديث الإحصائيات: العداد الكلي + عداد الشخص اللي طلع بالإيمبد
     const stats = loadStats();
@@ -513,8 +616,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.commandName === 'setroom') {
         const channel = interaction.options.getChannel('room');
-        config.GAME_CHANNEL_ID = channel.id;
-        saveConfig(config);
+        setGuildGameChannelId(interaction.guildId, channel.id);
 
         await interaction.reply({
             content: `✅ تم تحديد روم اللعب: <#${channel.id}>`,
@@ -528,7 +630,8 @@ client.on('interactionCreate', async (interaction) => {
 
         const questions = loadQuestions();
         const stats = loadStats();
-        const roomText = config.GAME_CHANNEL_ID ? `<#${config.GAME_CHANNEL_ID}>` : 'لم يتم تحديده';
+        const roomId = interaction.guildId ? getGuildGameChannelId(interaction.guildId) : config.GAME_CHANNEL_ID;
+        const roomText = roomId ? `<#${roomId}>` : 'لم يتم تحديده';
 
         // إيجاد الشخص الأكثر ظهوراً بالنتائج
         let topUserText = 'لا يوجد بعد';
@@ -564,7 +667,7 @@ client.once('ready', async () => {
 
     console.log(`✅ ${client.user.tag} جاهز ويعمل الآن!`);
     console.log(`📝 عدد الأسئلة المحملة: ${loadQuestions().length}`);
-    console.log(`🎮 روم اللعب الحالي: ${config.GAME_CHANNEL_ID || 'غير محدد - استخدم /setroom'}`);
+    console.log(`🎮 روم اللعب الحالي: إعدادات خاصة لكل سيرفر (استخدم /setroom داخل السيرفر)`);
 
     // تعيين حالة "Streaming" — لازم رابط تويتش/يوتيوب حقيقي بملف .env
     // ملاحظة مهمة: ديسكورد ما يقبل أي رابط، لازم يكون رابط تويتش (twitch.tv/...)
